@@ -1,4 +1,9 @@
 <?php
+/**
+ * @method array employee_get($filters, $options)
+ * @method array company_get($filters, $options)
+ * @method array timelineentry_create($fields)
+ */
 class com_gripp_API{
 
     private $apitoken;
