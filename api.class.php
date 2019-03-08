@@ -2,11 +2,11 @@
 class com_gripp_API{
 
     /*
-     * Version 3.0
      * Free to use in any way.
      * Created by Gripp.com B.V.
      */
 
+    private $apiconnectorversion = 3011;
     private $apitoken;
     private $url;
     private $id = 1;
@@ -14,7 +14,17 @@ class com_gripp_API{
     private $requests = array();
     private $reponseHeaders = array();
 
-    public function __construct($apitoken, $url = 'https://api.gripp.com/public/api3.php'){
+    //experimental auto paging
+    private $autopaging = false;
+    private $autopaging_in_progress = false;
+    private $autopaging_maxresults = 250; //max results per iteration. Fixed value also enforced on serverside.
+    private $autopaging_result = array();
+    private $lastres = null;
+
+    //added functionality to enable single batch request with autopagina enabled, for easier migration of existing scripts to APIv3
+
+    public function __construct($apitoken, $url = null){
+        $url = 'https://api.gripp.com/public/api3.php'; //mandatory from 2018-02-01;
         set_time_limit(0);
         if (!$apitoken){
             throw new \Exception('Api token is required');
@@ -31,12 +41,28 @@ class com_gripp_API{
         $this->url = $url;
     }
 
+    public function getVersion(){
+        return $this->apiconnectorversion;
+    }
+
+    public function setUrl($url){
+        $this->url = $url;
+    }
+
     public function setBatchmode($b){
         $this->batchmode = $b;
     }
 
     public function getBatchmode(){
         return $this->batchmode;
+    }
+
+    public function setAutoPaging($b){
+        $this->autopaging = $b;
+    }
+
+    public function getAutoPaging(){
+        return $this->autopaging;
     }
 
     public function handleResponseErrors($responses){
@@ -72,6 +98,7 @@ class com_gripp_API{
 
         foreach($this->requests as $r){
             $post[] = array(
+                'apiconnectorversion' => $this->apiconnectorversion,
                 'method' => $r['class'].'.'.$r['method'],
                 'params' => $r['params'],
                 'id' => $r['id']
@@ -88,17 +115,54 @@ class com_gripp_API{
             $post_string = json_encode($post);
             $result = $this->send($post_string);
             $result_decoded = json_decode($result, true);
-
-            return $this->handleResponseErrors($result_decoded);
+            $this->lastres = $this->handleResponseErrors($result_decoded);
+            return $this->lastres;
         }
         else{
-            return null;
+            if ($this->batchmode && $this->autopaging){
+                if ($this->autopaging_result) {
+                    return $this->autopaging_result;
+                }
+                else{
+                    return $this->lastres;
+                }
+            }
+            else if ($this->batchmode){
+                return $this->lastres;
+            }
+            else{
+                return null;
+            }
         }
     }
 
     public function __call($fullmethod, $params){
+        //echo "\nEntering: ".$fullmethod.' '.json_encode($params);
+
         list($class, $method) = explode("_", $fullmethod);
         $id = $this->id++;
+
+        //default filter array empty
+        if (!array_key_exists(0, $params)){
+            $params[0] = array();
+        }
+
+        //default options array empty
+        if (!array_key_exists(1, $params)){
+            $params[1] = array();
+        }
+
+        if ($this->autopaging && strtolower($method) == 'get'){
+//            if ($this->getBatchmode()){
+//                throw new \Exception('Autopaging not supported in batch-mode');
+//            }
+            if (!array_key_exists('paging', $params[1])){
+                $params[1]['paging'] = array(
+                    "firstresult" => 0,
+                    "maxresults" => $this->autopaging_maxresults
+                );
+            }
+        }
 
         $this->requests[$id] = array(
             'class' => $class,
@@ -106,8 +170,56 @@ class com_gripp_API{
             'params' => $params,
             'id' => $id
         );
-        if (!$this->batchmode){
-            return $this->run();
+        if (!$this->getBatchmode() || count($this->requests) == 1){
+            if ($this->autopaging && strtolower($method) == 'get'){
+
+                if (!$this->autopaging_in_progress){
+                    $this->autopaging_in_progress = true;
+                    $this->autopaging_result = array(
+                        array(
+                            'id' => $id,
+                            'autopaging_result' => true,
+                            'autopagina_number_of_calls' => 1,
+                            'result' => array(
+                                'rows' => array(),
+                                'count' => 0,
+                                'start' => 0,
+                                'limit' => 0,
+                                'next_start' => 0,
+                                'more_items_in_collection' => false
+                            ),
+                            'error' => null
+                        )
+                    );
+                }
+
+                $tempres = $this->run();
+                $tempres = $tempres[0]['result'];
+                $this->autopaging_result[0]['result']['rows'] = array_merge($this->autopaging_result[0]['result']['rows'], $tempres['rows']);
+                $this->autopaging_result[0]['result']['count'] = $tempres['count'];
+                $this->autopaging_result[0]['result']['start'] = 0;
+                $this->autopaging_result[0]['result']['limit'] = $tempres['count'];
+                $this->autopaging_result[0]['result']['next_start'] = null;
+                $this->autopaging_result[0]['result']['more_items_in_collection'] = false;
+
+                if ($tempres['more_items_in_collection']){
+                    $params[1]['paging'] = array(
+                        "firstresult" => $tempres['next_start'],
+                        "maxresults" => $this->autopaging_maxresults
+                    );
+                    $this->autopaging_result[0]['autopagina_number_of_calls']++;
+                    return $this->__call($fullmethod, $params);
+                }
+                else{
+                    $this->autopaging_in_progress = false;
+                    return $this->autopaging_result;
+                }
+            }
+            else{
+                if (!$this->getBatchmode()) {
+                    return $this->run();
+                }
+            }
         }
     }
 
